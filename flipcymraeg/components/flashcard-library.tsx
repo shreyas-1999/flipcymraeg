@@ -1,5 +1,7 @@
 "use client"
 
+import type React from "react"
+
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -9,7 +11,23 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Edit, Trash2, Play, Pause, Loader2, Search, Plus, Save, ArrowLeft, Package, X } from "lucide-react"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Edit,
+  Trash2,
+  Play,
+  Pause,
+  Loader2,
+  Search,
+  Plus,
+  Save,
+  ArrowLeft,
+  Package,
+  X,
+  Volume2,
+  BookOpen,
+  MicOff,
+} from "lucide-react"
 import { publicVocabularyService, type PublicVocabularyCard } from "@/lib/public-vocabulary-service"
 import { customFlashcardService, type CustomFlashcard } from "@/lib/custom-flashcard-service"
 import { geminiService } from "@/lib/gemini-service"
@@ -150,6 +168,618 @@ function AudioPlayer({ text, className }: AudioPlayerProps) {
   )
 }
 
+// Audio Controls Component (for flashcard popup)
+interface AudioControlsProps {
+  text: string
+  className?: string
+}
+
+function AudioControls({ text, className }: AudioControlsProps) {
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+
+  const playAudio = async (speed: "normal" | "slow") => {
+    if (isPlaying || isLoading) return
+
+    setIsLoading(true)
+
+    try {
+      const speakingRate = speed === "slow" ? 0.6 : 1.0
+      const audioContent = await ttsService.synthesizeSpeech(text, speakingRate)
+
+      setIsPlaying(true)
+      setIsLoading(false)
+
+      await ttsService.playAudio(audioContent)
+    } catch (error) {
+      console.error("Failed to play audio:", error)
+    } finally {
+      setIsPlaying(false)
+      setIsLoading(false)
+    }
+  }
+
+  return (
+    <div className={`flex items-center space-x-2 ${className}`}>
+      <Volume2 className="h-4 w-4 text-gray-600" />
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => playAudio("normal")}
+        disabled={isLoading || isPlaying}
+        className="bg-transparent"
+      >
+        Normal
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => playAudio("slow")}
+        disabled={isLoading || isPlaying}
+        className="bg-transparent"
+      >
+        Slow
+      </Button>
+      {isLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+    </div>
+  )
+}
+
+// Voice Practice Component
+interface VoicePracticeProps {
+  targetWord: string
+  className?: string
+}
+
+function VoicePractice({ targetWord, className }: VoicePracticeProps) {
+  const [isRecording, setIsRecording] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [feedback, setFeedback] = useState<{
+    type: "perfect" | "close" | "incorrect"
+    message: string
+  } | null>(null)
+  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null)
+  const [audioLevel, setAudioLevel] = useState(0)
+  const [microphoneAccess, setMicrophoneAccess] = useState<"unknown" | "granted" | "denied">("unknown")
+
+  // Check microphone permissions
+  const checkMicrophonePermissions = async () => {
+    try {
+      const result = await navigator.permissions.query({ name: "microphone" as PermissionName })
+      setMicrophoneAccess(result.state === "granted" ? "granted" : result.state === "denied" ? "denied" : "unknown")
+
+      result.onchange = () => {
+        setMicrophoneAccess(result.state === "granted" ? "granted" : result.state === "denied" ? "denied" : "unknown")
+      }
+    } catch (error) {
+      console.log("Permissions API not supported")
+    }
+  }
+
+  useEffect(() => {
+    checkMicrophonePermissions()
+  }, [])
+
+  const startRecording = async () => {
+    try {
+      console.log("Requesting microphone access...")
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+
+      console.log("Microphone access granted")
+      setMicrophoneAccess("granted")
+
+      const recorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm;codecs=opus",
+      })
+
+      let hasAudioInput = false
+      let audioContext: AudioContext | null = null
+      let audioMonitor: NodeJS.Timeout
+      let recordedChunks: Blob[] = []
+
+      // Create audio context to monitor audio levels
+      try {
+        audioContext = new AudioContext()
+        const source = audioContext.createMediaStreamSource(stream)
+        const analyser = audioContext.createAnalyser()
+        analyser.fftSize = 256
+        analyser.smoothingTimeConstant = 0.8
+        source.connect(analyser)
+
+        const bufferLength = analyser.frequencyBinCount
+        const dataArray = new Uint8Array(bufferLength)
+
+        // Function to check for audio input
+        const checkAudioLevel = () => {
+          if (audioContext && audioContext.state !== "closed") {
+            analyser.getByteFrequencyData(dataArray)
+            const average = dataArray.reduce((a, b) => a + b) / bufferLength
+
+            // Update visual audio level
+            setAudioLevel(average)
+
+            // Higher threshold for voice detection (was 5, now 15)
+            if (average > 15) {
+              console.log("Voice detected, level:", average)
+              hasAudioInput = true
+            }
+          }
+        }
+
+        // Monitor audio levels more frequently
+        audioMonitor = setInterval(() => {
+          if (audioContext && audioContext.state !== "closed") {
+            checkAudioLevel()
+          } else {
+            clearInterval(audioMonitor)
+          }
+        }, 50) // Check every 50ms instead of 100ms
+
+        // Auto-stop recording after 5 seconds
+        const autoStopTimeout = setTimeout(() => {
+          if (recorder.state === "recording") {
+            console.log("Auto-stopping recording after 5 seconds")
+            recorder.stop()
+            setIsRecording(false)
+          }
+        }, 5000)
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            recordedChunks.push(event.data)
+            console.log("Audio chunk received, size:", event.data.size)
+          }
+        }
+
+        recorder.onstop = async () => {
+          console.log("Recording stopped, chunks:", recordedChunks.length)
+          clearInterval(audioMonitor)
+          clearTimeout(autoStopTimeout)
+          setAudioLevel(0)
+
+          if (audioContext && audioContext.state !== "closed") {
+            audioContext.close()
+          }
+
+          // Process audio if we have chunks
+          if (recordedChunks.length > 0) {
+            const audioBlob = new Blob(recordedChunks, { type: "audio/webm" })
+            console.log("Processing audio blob, size:", audioBlob.size)
+            await processAudio(audioBlob)
+          } else {
+            console.log("No audio chunks to process")
+            setFeedback({
+              type: "incorrect",
+              message: "No audio was recorded. Please try again and make sure to speak into your microphone.",
+            })
+          }
+
+          recordedChunks = []
+          // Stop all tracks to release microphone
+          stream.getTracks().forEach((track) => track.stop())
+        }
+
+        setMediaRecorder(recorder)
+        recorder.start()
+        setIsRecording(true)
+        setFeedback(null)
+        console.log("Recording started")
+      } catch (audioContextError) {
+        console.error("Error creating audio context:", audioContextError)
+        // Fallback without audio monitoring
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            recordedChunks.push(event.data)
+            console.log("Audio chunk received (fallback), size:", event.data.size)
+          }
+        }
+
+        recorder.onstop = async () => {
+          console.log("Recording stopped (fallback)")
+          if (recordedChunks.length > 0) {
+            const audioBlob = new Blob(recordedChunks, { type: "audio/webm" })
+            console.log("Processing audio blob (fallback), size:", audioBlob.size)
+            await processAudio(audioBlob)
+          } else {
+            console.log("No audio chunks to process (fallback)")
+            setFeedback({
+              type: "incorrect",
+              message: "No audio was recorded. Please try again and make sure to speak into your microphone.",
+            })
+          }
+          recordedChunks = []
+          stream.getTracks().forEach((track) => track.stop())
+        }
+
+        setMediaRecorder(recorder)
+        recorder.start()
+        setIsRecording(true)
+        setFeedback(null)
+
+        // Simple timeout without audio monitoring
+        setTimeout(() => {
+          if (recorder.state === "recording") {
+            recorder.stop()
+            setIsRecording(false)
+          }
+        }, 5000) // Longer timeout for fallback
+      }
+    } catch (error) {
+      console.error("Error accessing microphone:", error)
+      setMicrophoneAccess("denied")
+
+      if (error instanceof DOMException) {
+        if (error.name === "NotAllowedError") {
+          alert("Microphone access denied. Please allow microphone access in your browser settings and try again.")
+        } else if (error.name === "NotFoundError") {
+          alert("No microphone found. Please connect a microphone and try again.")
+        } else {
+          alert(`Microphone error: ${error.message}`)
+        }
+      } else {
+        alert("Could not access microphone. Please check permissions and try again.")
+      }
+    }
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      console.log("Manually stopping recording")
+      mediaRecorder.stop()
+      setIsRecording(false)
+    }
+  }
+
+  const processAudio = async (audioBlob: Blob) => {
+    setIsProcessing(true)
+    console.log("Processing audio blob of size:", audioBlob.size)
+
+    try {
+      // Convert WebM to base64
+      const arrayBuffer = await audioBlob.arrayBuffer()
+      const uint8Array = new Uint8Array(arrayBuffer)
+      const base64Audio = btoa(String.fromCharCode(...uint8Array))
+
+      console.log("Sending audio to Gemini API...")
+
+      // Send to Gemini for pronunciation evaluation
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.NEXT_PUBLIC_GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: `You are a Welsh pronunciation expert. The user is trying to pronounce the Welsh word "${targetWord}". 
+
+Listen to the audio and evaluate their pronunciation. Respond with ONLY a JSON object:
+
+{
+  "transcription": "What the user said phonetically",
+  "accuracy": "perfect" | "close" | "incorrect", 
+  "feedback": "Brief, encouraging feedback (max 2 sentences)"
+}
+
+Guidelines:
+- "perfect": Pronunciation matches Welsh pronunciation very closely
+- "close": Recognizable but needs minor improvement
+- "incorrect": Significantly off or unrecognizable
+
+Keep feedback brief and encouraging. Focus on the most important pronunciation tip if not perfect.
+
+Target word: "${targetWord}"`,
+                  },
+                  {
+                    inline_data: {
+                      mime_type: "audio/webm",
+                      data: base64Audio,
+                    },
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.3,
+              topK: 40,
+              topP: 0.95,
+              maxOutputTokens: 512,
+            },
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(`Gemini API error: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const generatedText = data.candidates[0].content.parts[0].text
+      console.log("Gemini response:", generatedText)
+
+      // Clean up the response and parse JSON
+      const cleanedText = generatedText.replace(/```json\n?|\n?```/g, "").trim()
+
+      try {
+        const result = JSON.parse(cleanedText)
+        setFeedback({
+          type: result.accuracy,
+          message: result.transcription ? `You said: "${result.transcription}"\n\n${result.feedback}` : result.feedback,
+        })
+      } catch (parseError) {
+        console.error("Failed to parse Gemini response:", cleanedText)
+        setFeedback({
+          type: "incorrect",
+          message: "Sorry, I couldn't evaluate your pronunciation. Please try again.",
+        })
+      }
+    } catch (error) {
+      console.error("Error processing audio:", error)
+      setFeedback({
+        type: "incorrect",
+        message: "Sorry, there was an error processing your pronunciation. Please try again.",
+      })
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const getFeedbackColor = (type: string) => {
+    switch (type) {
+      case "perfect":
+        return "text-green-600 bg-green-50 border-green-200"
+      case "close":
+        return "text-yellow-600 bg-yellow-50 border-yellow-200"
+      case "incorrect":
+        return "text-red-600 bg-red-50 border-red-200"
+      default:
+        return "text-gray-600 bg-gray-50 border-gray-200"
+    }
+  }
+
+  const getFeedbackIcon = (type: string) => {
+    switch (type) {
+      case "perfect":
+        return "🎉"
+      case "close":
+        return "👍"
+      case "incorrect":
+        return "🔄"
+      default:
+        return "ℹ️"
+    }
+  }
+
+  return (
+    <div className={`space-y-4 ${className}`}>
+      <div className="text-center">
+        <p className="text-sm text-gray-600 mb-3">Test your pronunciation skills</p>
+
+        {/* Microphone Status - only show if access is denied */}
+        {microphoneAccess === "denied" && (
+          <div className="flex items-center justify-center mb-2">
+            <div className="flex items-center text-red-600 text-xs">
+              <MicOff className="h-3 w-3 mr-1" />
+              Microphone access denied
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-center">
+          {!isRecording ? (
+            <Button
+              onClick={startRecording}
+              disabled={isProcessing}
+              variant="outline"
+              size="lg"
+              className="w-16 h-16 rounded-full bg-transparent border-purple-300 text-purple-600 hover:bg-purple-50 p-0"
+            >
+              {isProcessing ? <Loader2 className="h-6 w-6 animate-spin" /> : <Volume2 className="h-6 w-6" />}
+            </Button>
+          ) : (
+            <Button
+              onClick={stopRecording}
+              size="lg"
+              className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 animate-pulse p-0"
+            >
+              <div className="h-3 w-3 bg-white rounded-full animate-pulse" />
+            </Button>
+          )}
+        </div>
+
+        {/* Audio Level Indicator */}
+        {isRecording && (
+          <div className="mt-3">
+            <div className="text-xs text-gray-500 mb-1">Audio Level</div>
+            <div className="w-32 h-2 bg-gray-200 rounded-full mx-auto overflow-hidden">
+              <div
+                className={`h-full transition-all duration-100 ${audioLevel > 15 ? "bg-green-500" : "bg-red-400"}`}
+                style={{ width: `${Math.min(audioLevel * 2, 100)}%` }}
+              />
+            </div>
+            <div className="text-xs text-gray-500 mt-1">{audioLevel > 15 ? "Voice detected!" : "Speak louder"}</div>
+          </div>
+        )}
+
+        {isRecording && (
+          <p className="text-xs text-gray-500 mt-2">
+            Recording will auto-stop after 5 seconds or click to stop manually
+          </p>
+        )}
+      </div>
+
+      {feedback && (
+        <div className={`p-4 rounded-lg border ${getFeedbackColor(feedback.type)}`}>
+          <div className="flex items-start space-x-2">
+            <span className="text-lg">{getFeedbackIcon(feedback.type)}</span>
+            <div>
+              <div className="font-semibold capitalize mb-1">
+                {feedback.type === "perfect" && "Perfect Pronunciation!"}
+                {feedback.type === "close" && "Close, but can be better"}
+                {feedback.type === "incorrect" && "That wasn't correct, try again"}
+              </div>
+              <p className="text-sm whitespace-pre-line">{feedback.message}</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Flashcard Popup Component
+interface FlashcardPopupProps {
+  card: PublicVocabularyCard | CustomFlashcard | null
+  isOpen: boolean
+  onClose: () => void
+}
+
+function FlashcardPopup({ card, isOpen, onClose }: FlashcardPopupProps) {
+  const { practiceMode } = useSettings()
+  const [showAnswer, setShowAnswer] = useState(false)
+  const [showExamples, setShowExamples] = useState(false)
+
+  // Reset state when card changes or popup opens
+  useEffect(() => {
+    if (isOpen) {
+      setShowAnswer(false)
+      setShowExamples(false)
+    }
+  }, [isOpen, card])
+
+  const getDifficultyColor = (difficulty?: string) => {
+    switch (difficulty) {
+      case "Beginner":
+        return "bg-green-100 text-green-800"
+      case "Intermediate":
+        return "bg-yellow-100 text-yellow-800"
+      case "Advanced":
+        return "bg-red-100 text-red-800"
+      default:
+        return "bg-gray-100 text-gray-800"
+    }
+  }
+
+  // Don't render if card is null
+  if (!card) {
+    return null
+  }
+
+  const isCustomCard = "points" in card
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Flashcard Details</DialogTitle>
+          <DialogDescription>
+            {isCustomCard ? "Custom flashcard" : "Public flashcard"} from {card.category} category
+          </DialogDescription>
+        </DialogHeader>
+
+        <Card className="border-0 shadow-none">
+          <CardHeader className="text-center px-0">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-2">
+                <Badge className={isCustomCard ? "bg-purple-100 text-purple-800" : "bg-blue-100 text-blue-800"}>
+                  {card.category}
+                </Badge>
+                {"difficulty" in card && card.difficulty && (
+                  <Badge className={getDifficultyColor(card.difficulty)}>{card.difficulty}</Badge>
+                )}
+                {isCustomCard && <Badge className="bg-gray-100 text-gray-800">Custom</Badge>}
+              </div>
+              {isCustomCard && <div className="text-sm font-semibold text-blue-600">{card.points}/50 pts</div>}
+            </div>
+            {practiceMode === "welsh-to-english" ? (
+              <>
+                <CardTitle className="text-4xl font-bold text-red-600 mb-2">{card.welsh}</CardTitle>
+                <CardDescription className="text-lg">Pronunciation: {card.pronunciation}</CardDescription>
+              </>
+            ) : (
+              <CardTitle className="text-4xl font-bold text-blue-600 mb-2">{card.english}</CardTitle>
+            )}
+          </CardHeader>
+          <CardContent className="space-y-6 px-0">
+            {/* Audio Controls - only show for Welsh words */}
+            {practiceMode === "welsh-to-english" && (
+              <div className="flex justify-center">
+                <AudioControls text={card.welsh} />
+              </div>
+            )}
+
+            {!showAnswer ? (
+              <div className="text-center">
+                <p className="text-gray-600 mb-6">
+                  {practiceMode === "welsh-to-english" ? "What does this mean in English?" : "What is this in Welsh?"}
+                </p>
+                <Button onClick={() => setShowAnswer(true)} className="bg-blue-600 hover:bg-blue-700">
+                  Show Answer
+                </Button>
+              </div>
+            ) : (
+              <div className="text-center space-y-6">
+                {practiceMode === "welsh-to-english" ? (
+                  <div className="text-2xl font-semibold text-green-600">{card.english}</div>
+                ) : (
+                  <>
+                    <div className="text-2xl font-semibold text-red-600">{card.welsh}</div>
+                    <div className="text-lg text-gray-600">Pronunciation: {card.pronunciation}</div>
+                    <div className="flex justify-center">
+                      <AudioControls text={card.welsh} />
+                    </div>
+                  </>
+                )}
+
+                {/* Voice Practice - available for both modes but focuses on Welsh pronunciation */}
+                <VoicePractice targetWord={card.welsh} />
+
+                {/* Examples Dialog */}
+                <Dialog open={showExamples} onOpenChange={setShowExamples}>
+                  <Button variant="outline" onClick={() => setShowExamples(true)} className="bg-transparent">
+                    <BookOpen className="mr-2 h-4 w-4" />
+                    View Examples
+                  </Button>
+                  <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                      <DialogTitle>Example Sentences</DialogTitle>
+                      <DialogDescription>See how "{card.welsh}" is used in context</DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                      {card.examples.map((example, index) => (
+                        <Card key={index} className="p-4">
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="font-semibold text-red-600">{example.welsh}</div>
+                              <AudioControls text={example.welsh} />
+                            </div>
+                            <div className="text-gray-700 italic">{example.english}</div>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // Create Deck Component
 interface CreateDeckProps {
   onBack: () => void
@@ -161,6 +791,7 @@ interface CreateDeckProps {
 function CreateDeck({ onBack, onDeckCreated, existingCategories, customFlashcards }: CreateDeckProps) {
   const { user } = useAuth()
   const [category, setCategory] = useState("")
+  const [description, setDescription] = useState("")
   const [isNewCategory, setIsNewCategory] = useState(true)
   const [numberOfCards, setNumberOfCards] = useState(10)
   const [isGenerating, setIsGenerating] = useState(false)
@@ -201,7 +832,7 @@ function CreateDeck({ onBack, onDeckCreated, existingCategories, customFlashcard
         const difficulty = difficulties[i % difficulties.length]
 
         // Create a more sophisticated prompt for diverse word generation
-        const generateWordPrompt = `
+        let generateWordPrompt = `
 You are a Welsh language expert creating diverse vocabulary cards for the category "${category}".
 
 Generate a single English word that is:
@@ -219,12 +850,21 @@ Examples for different categories:
 - Food: ingredients, cooking methods, utensils, flavors, meal types, dining experiences
 - Animals: habitats, behaviors, body parts, sounds, animal care, wildlife concepts
 - Weather: phenomena, measurements, clothing, activities, seasonal concepts
-- Colors: shades, artistic terms, emotional associations, objects typically that color
+- Colors: shades, artistic terms, emotional associations, objects typically that color`
+
+        // Add description context if provided
+        if (description.trim()) {
+          generateWordPrompt += `
+
+Additional context: ${description.trim()}
+Please consider this context when selecting words that fit the category and user's specific needs.`
+        }
+
+        generateWordPrompt += `
 
 Respond with ONLY a single English word, nothing else.
 
-Word ${i + 1} for "${category}" (${difficulty} level):
-`
+Word ${i + 1} for "${category}" (${difficulty} level):`
 
         try {
           // First, get a diverse English word suggestion
@@ -460,6 +1100,7 @@ Word ${i + 1} for "${category}" (${difficulty} level):
                 </p>
                 <p className="text-sm text-blue-600 mt-1">
                   {generatedCards.length} cards completed • Creating unique words with varied difficulty levels
+                  {description.trim() && " • Using your custom description"}
                 </p>
               </div>
               <Button
@@ -510,6 +1151,7 @@ Word ${i + 1} for "${category}" (${difficulty} level):
               </p>
               <p className="text-sm text-blue-600 mt-1">
                 Mixed difficulty levels with diverse vocabulary related to {category}
+                {description.trim() && " • Generated using your custom description"}
               </p>
             </div>
 
@@ -644,6 +1286,20 @@ Word ${i + 1} for "${category}" (${difficulty} level):
           </div>
 
           <div className="space-y-2">
+            <Label htmlFor="description">Description (Optional)</Label>
+            <Textarea
+              id="description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="e.g., Focus on cooking verbs and kitchen utensils, Include advanced medical terminology, Words related to outdoor activities and hiking..."
+              className="min-h-20"
+            />
+            <p className="text-sm text-gray-500">
+              Provide additional context about the type of words you want. This helps generate more targeted vocabulary.
+            </p>
+          </div>
+
+          <div className="space-y-2">
             <Label htmlFor="card-count">Number of Cards to Generate</Label>
             <div className="flex items-center space-x-4">
               <Input
@@ -677,6 +1333,7 @@ Word ${i + 1} for "${category}" (${difficulty} level):
               <li>
                 • AI will generate {numberOfCards} unique words related to "{category || "your category"}"
               </li>
+              {description.trim() && <li>• Your description will guide the AI to generate more specific vocabulary</li>}
               <li>• Each card will appear as soon as it's generated (no waiting for all cards)</li>
               <li>• You can cancel generation at any time and save the cards created so far</li>
               <li>• Words will be contextually related but diverse (not just the category word repeated)</li>
@@ -878,6 +1535,7 @@ export default function FlashcardLibrary() {
   const [selectedCategory, setSelectedCategory] = useState("All")
   const [categories, setCategories] = useState<{ public: string[]; custom: string[] }>({ public: [], custom: [] })
   const [editingFlashcard, setEditingFlashcard] = useState<CustomFlashcard | null>(null)
+  const [viewingFlashcard, setViewingFlashcard] = useState<PublicVocabularyCard | CustomFlashcard | null>(null)
   const [view, setView] = useState<"library" | "create" | "create-deck">("library")
 
   useEffect(() => {
@@ -943,6 +1601,15 @@ export default function FlashcardLibrary() {
     } catch (error) {
       console.error("Failed to update flashcard:", error)
     }
+  }
+
+  const handleCardClick = (card: PublicVocabularyCard | CustomFlashcard, event: React.MouseEvent) => {
+    // Don't open popup if clicking on action buttons
+    const target = event.target as HTMLElement
+    if (target.closest("button") || target.closest('[role="button"]')) {
+      return
+    }
+    setViewingFlashcard(card)
   }
 
   const getDifficultyColor = (difficulty?: string) => {
@@ -1065,7 +1732,11 @@ export default function FlashcardLibrary() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredPublicFlashcards.map((card) => (
-              <Card key={card.id} className="hover:shadow-md transition-shadow">
+              <Card
+                key={card.id}
+                className="hover:shadow-md transition-shadow cursor-pointer"
+                onClick={(e) => handleCardClick(card, e)}
+              >
                 <CardHeader>
                   <div className="flex items-center justify-between mb-2">
                     <Badge className="bg-blue-100 text-blue-800">{card.category}</Badge>
@@ -1139,7 +1810,11 @@ export default function FlashcardLibrary() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredCustomFlashcards.map((card) => (
-              <Card key={card.id} className="hover:shadow-md transition-shadow">
+              <Card
+                key={card.id}
+                className="hover:shadow-md transition-shadow cursor-pointer"
+                onClick={(e) => handleCardClick(card, e)}
+              >
                 <CardHeader>
                   <div className="flex items-center justify-between mb-2">
                     <Badge className="bg-purple-100 text-purple-800">{card.category}</Badge>
@@ -1165,7 +1840,10 @@ export default function FlashcardLibrary() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setEditingFlashcard(card)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setEditingFlashcard(card)
+                        }}
                         className="bg-transparent"
                       >
                         <Edit className="h-4 w-4" />
@@ -1173,7 +1851,10 @@ export default function FlashcardLibrary() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleDeleteCustomFlashcard(card.id!)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleDeleteCustomFlashcard(card.id!)
+                        }}
                         className="text-red-600 hover:text-red-700 bg-transparent"
                       >
                         <Trash2 className="h-4 w-4" />
@@ -1193,6 +1874,9 @@ export default function FlashcardLibrary() {
           )}
         </TabsContent>
       </Tabs>
+
+      {/* Flashcard Popup */}
+      <FlashcardPopup card={viewingFlashcard} isOpen={!!viewingFlashcard} onClose={() => setViewingFlashcard(null)} />
 
       {/* Edit Dialog */}
       <Dialog open={!!editingFlashcard} onOpenChange={() => setEditingFlashcard(null)}>
