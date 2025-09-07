@@ -869,7 +869,7 @@ Word ${i + 1} for "${category}" (${difficulty} level):`
         try {
           // First, get a diverse English word suggestion
           const wordResponse = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=AIzaSyD7vLEopz_DibqtrGGX6snnz32DrT3iSkk`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=AIzaSyBc_B-OlzDZvRr1j0C4bUJPM83xtAkkp4A`,
             {
               method: "POST",
               headers: {

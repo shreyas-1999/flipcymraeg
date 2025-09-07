@@ -12,7 +12,7 @@ export class GeminiService {
   private baseUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 
   constructor() {
-    this.apiKey = "AIzaSyD7vLEopz_DibqtrGGX6snnz32DrT3iSkk"
+    this.apiKey = "AIzaSyBc_B-OlzDZvRr1j0C4bUJPM83xtAkkp4A"
   }
 
   async translateToWelsh(englishWord: string, category: string): Promise<GeminiTranslationResponse> {
